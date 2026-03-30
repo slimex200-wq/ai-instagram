@@ -1,8 +1,8 @@
 name: Daily AI Card News (Instagram)
 
 on:
-  schedule:
-    - cron: '30 22,10 * * *'  # KST 07:30, 19:30
+  # schedule:
+  #   - cron: '30 22,10 * * *'  # KST 07:30, 19:30 — 설정 완료 후 활성화
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,8 @@ env:
   TZ: Asia/Seoul
 
 jobs:
-  generate-and-post:
+  generate:
+    name: 카드뉴스 생성
     runs-on: ubuntu-latest
 
     steps:
@@ -30,26 +31,21 @@ jobs:
           mkdir -p ~/.claude/skills/last30days
           ln -s "$GITHUB_WORKSPACE/.last30days-skill/scripts" ~/.claude/skills/last30days/scripts
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Chrome
-        uses: browser-actions/setup-chrome@v1
+      - uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
 
-      - name: Install yt-dlp
-        run: pip install yt-dlp
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Install fonts
+      - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk
+          pip install yt-dlp
+          sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
 
       - name: Generate card news
         env:
@@ -69,16 +65,35 @@ jobs:
           git diff --staged --quiet || git commit -m "chore: $(date +%Y-%m-%d) 카드뉴스 생성"
           git push
 
+  post:
+    name: Instagram 포스팅
+    runs-on: ubuntu-latest
+    needs: generate
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Pull latest (카드뉴스 커밋 반영)
+        run: git pull origin master
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install httpx
+
       - name: Wait for Pages deployment
         run: |
           DATE=$(date +%Y-%m-%d)
-          BASE_URL="https://slimex200-wq.github.io/ai-instagram"
-          URL="${BASE_URL}/cards/${DATE}/card-01.png"
+          URL="https://slimex200-wq.github.io/ai-instagram/cards/${DATE}/card-01.png"
           echo "Pages 배포 확인: $URL"
           for i in $(seq 1 12); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
             if [ "$STATUS" = "200" ]; then
-              echo "Pages 배포 확인 완료"
+              echo "Pages 배포 완료"
               break
             fi
             echo "대기 중... ($((i * 10))초) status=$STATUS"
@@ -91,66 +106,6 @@ jobs:
           INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
         run: |
           DATE=$(date +%Y-%m-%d)
-          BASE_URL="https://slimex200-wq.github.io/ai-instagram"
-
-          python -c "
-          import os, time, glob, json
-          import httpx
-
-          access_token = os.environ.get('INSTAGRAM_ACCESS_TOKEN', '')
-          user_id = os.environ.get('INSTAGRAM_USER_ID', '')
-          if not access_token or not user_id:
-              print('INSTAGRAM 토큰 미설정, 포스팅 건너뜀')
-              exit(0)
-
-          date_str = '${DATE}'
-          base_url = '${BASE_URL}'
-          GRAPH_API = 'https://graph.instagram.com/v22.0'
-
-          caption = ''
-          try:
-              with open(f'output/{date_str}/caption.txt', encoding='utf-8') as f:
-                  caption = f.read().strip()
-          except FileNotFoundError:
-              caption = 'AI Daily'
-
-          card_files = sorted(glob.glob(f'output/{date_str}/card-*.png'))
-          image_urls = [
-              f'{base_url}/cards/{date_str}/{os.path.basename(f)}'
-              for f in card_files
-          ]
-          print(f'Instagram 캐러셀: {len(image_urls)}장')
-
-          with httpx.Client(timeout=30.0) as client:
-              children = []
-              for i, url in enumerate(image_urls, 1):
-                  resp = client.post(f'{GRAPH_API}/{user_id}/media', params={
-                      'image_url': url, 'is_carousel_item': 'true', 'access_token': access_token,
-                  })
-                  if resp.status_code >= 400:
-                      raise RuntimeError(f'이미지 {i} 실패: {resp.text[:300]}')
-                  children.append(resp.json()['id'])
-                  print(f'  이미지 {i}/{len(image_urls)}: {children[-1]}')
-
-              time.sleep(5)
-              resp = client.post(f'{GRAPH_API}/{user_id}/media', params={
-                  'media_type': 'CAROUSEL', 'children': ','.join(children),
-                  'caption': caption, 'access_token': access_token,
-              })
-              if resp.status_code >= 400:
-                  raise RuntimeError(f'캐러셀 생성 실패: {resp.text[:300]}')
-              carousel_id = resp.json()['id']
-
-              time.sleep(5)
-              for attempt in range(1, 6):
-                  resp = client.post(f'{GRAPH_API}/{user_id}/media_publish', params={
-                      'creation_id': carousel_id, 'access_token': access_token,
-                  })
-                  if resp.status_code < 400:
-                      print(f'Instagram 포스팅 완료: {resp.json()[\"id\"]}')
-                      break
-                  print(f'  발행 재시도 {attempt}/5...')
-                  time.sleep(5)
-              else:
-                  raise RuntimeError(f'발행 실패: {resp.text[:300]}')
-          "
+          python instagram_poster.py \
+            --date "$DATE" \
+            --base-url "https://slimex200-wq.github.io/ai-instagram"
